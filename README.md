@@ -2,9 +2,9 @@
 
 Keyboard chatter filter for Linux. A worn mechanical switch sometimes
 registers one press as two. mechabounce grabs the keyboard's evdev device and
-drops any press that comes within a threshold of that key's last release. It
-re-emits everything else on a virtual copy of the keyboard through uinput. It
-works below X11 and Wayland, so it covers every desktop and the console.
+swallows any press that comes within a threshold of that key's last release.
+It re-emits everything else on a virtual copy of the keyboard through uinput.
+It works below X11 and Wayland, so it covers every desktop and the console.
 
 It's a rewrite of [KeyboardChatteringFix-Linux][kcf] as a small Rust binary:
 about 400 KB, under 2 MB of memory, two syscalls per keystroke, and no
@@ -15,10 +15,23 @@ dependency besides libc.
 ## The rule
 
 A press is chatter if it comes no more than `--threshold` ms (default 30)
-after the same key's last release. The release that belongs to a dropped
-press is dropped as well. Dropped presses don't restart the clock, so a burst
-of bounces can't lock a key out. Deliberate fast double taps leave about
+after the same key's last release. Deliberate fast double taps leave about
 50 ms between release and press, so the default stays below that.
+
+By default mechabounce holds every release back for the threshold. If the key
+goes down again within it, the release and the press both vanish and the key
+stays held; otherwise the release goes out late. Presses go out at once. This
+also covers a switch that bounces while being pressed (down, up, down, held):
+the key stays down, so a bouncing Shift still shifts and a held key still
+repeats. The cost is that releases arrive the threshold (plus 1 ms) later, and
+during a hold the kernel's autorepeat may produce at most one extra repeat in
+that window.
+
+`--no-defer-release` restores the original rule: releases go out at once, and
+a press that follows one too closely is dropped together with its release.
+Dropped presses don't restart the clock, so a burst of bounces can't lock a
+key out. A bounce while pressing, though, leaves the key released while it is
+physically held.
 
 The virtual keyboard has the real one's name and IDs, so per-device desktop
 settings still apply. Caps Lock and other LED changes made on the virtual
@@ -53,6 +66,8 @@ log with `journalctl -u 'mechabounce@*' -f`.
 ```
 -k, --keyboard DEV   a name in /dev/input/by-id, an eventN name, or a path
 -t, --threshold MS   chatter threshold [default: 30]
+--defer-release      hold releases back for the threshold [default]
+--no-defer-release   forward releases at once, drop quick presses instead
 -v, --verbosity N    0 quiet, 1 log filtered events, 2 log every key [default: 1]
 -l, --list           list keyboards in /dev/input/by-id
 ```

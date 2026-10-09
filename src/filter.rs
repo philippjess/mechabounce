@@ -2,9 +2,10 @@
 //!
 //! The kernel groups events into frames ended by `SYN_REPORT`. Frames are
 //! kept intact: a frame loses only the dropped keys (and their `MSC_SCAN`),
-//! and a frame left with nothing to say is dropped whole.
+//! and a frame left with nothing to say is dropped whole. Deferred releases
+//! go out later, each in a frame of its own.
 
-use crate::debounce::{Debounce, Verdict};
+use crate::debounce::{Debounce, Mode, Verdict};
 use crate::sys::{
     EV_KEY, EV_LED, EV_MSC, EV_REP, EV_SND, EV_SYN, InputEvent, KEY_CNT, KeyBits, MSC_SCAN,
     SYN_DROPPED, SYN_REPORT, set_bit, test_bit,
@@ -30,9 +31,15 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub fn new(threshold_ns: u64, soft_repeat: bool, ignore_before_ns: u64, verbosity: u8) -> Self {
+    pub fn new(
+        threshold_ns: u64,
+        mode: Mode,
+        soft_repeat: bool,
+        ignore_before_ns: u64,
+        verbosity: u8,
+    ) -> Self {
         Self {
-            keys: Debounce::new(threshold_ns),
+            keys: Debounce::new(threshold_ns, mode),
             soft_repeat,
             ignore_before_ns,
             verbosity,
@@ -51,6 +58,7 @@ impl Filter {
         if ev.time_ns() < self.ignore_before_ns {
             return false;
         }
+        self.flush_due(ev.time_ns());
         match (ev.type_, ev.code) {
             (EV_SYN, SYN_REPORT) => {
                 if self.dropping {
@@ -134,7 +142,42 @@ impl Filter {
                 }
                 false
             }
+            Verdict::Deferred => {
+                if self.verbosity >= 2 {
+                    eprintln!("key {code} up deferred");
+                }
+                false
+            }
         }
+    }
+
+    /// Emits the deferred releases due at `now_ns`, one frame each, ahead
+    /// of the open frame.
+    pub fn flush_due(&mut self, now_ns: u64) {
+        let before = self.out.len();
+        let Self {
+            keys,
+            out,
+            emitted,
+            verbosity,
+            ..
+        } = self;
+        keys.take_due(now_ns, |code| {
+            if *verbosity >= 2 {
+                eprintln!("key {code} up");
+            }
+            out.extend([InputEvent::new(EV_KEY, code, 0), InputEvent::syn_report()]);
+            set_bit(emitted, code.into(), false);
+        });
+        let added = self.out.len() - before;
+        self.out[self.frame_start..].rotate_right(added);
+        self.frame_start += added;
+    }
+
+    /// When [`Self::flush_due`] next has something to emit: once the time is
+    /// past this.
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.keys.next_deadline()
     }
 
     /// After a `SYN_DROPPED`: releases every key held down on the virtual
@@ -148,7 +191,7 @@ impl Filter {
             // The discarded events may have moved the debounce state.
             self.keys.reset(code, down);
             if down && !test_bit(held, code.into()) {
-                self.keys.key(code, 0, t_ns);
+                self.keys.release_now(code, t_ns);
                 set_bit(&mut self.emitted, code.into(), false);
                 self.out.push(InputEvent::new(EV_KEY, code, 0));
                 released = true;

@@ -113,15 +113,38 @@ fn key_frames(sink: &Evdev, want: usize) -> Vec<Vec<(u16, u16, i32)>> {
     frames
 }
 
-#[test]
-#[ignore = "needs root and /dev/uinput; run with `just e2e`"]
-fn filters_chatter_and_relays_leds() {
-    let name = format!("mechabounce-e2e-{}", std::process::id());
+type Frame = Vec<(u16, u16, i32)>;
+
+/// A key frame as the fake keyboard sends it.
+fn frame(code: u16, value: i32) -> Frame {
+    vec![(EV_MSC, MSC_SCAN, code as i32), (EV_KEY, code, value)]
+}
+
+/// A deferred release: it goes out on its own, without a scan code.
+fn deferred_up(code: u16) -> Frame {
+    vec![(EV_KEY, code, 0)]
+}
+
+fn ms(n: u64) {
+    sleep(Duration::from_millis(n));
+}
+
+/// The binary between a fake keyboard and the virtual one it made.
+struct Rig {
+    sink: Evdev,
+    _child: KillOnDrop,
+    src: Uinput,
+}
+
+/// Runs the binary with `args` on a fake keyboard, types `keys` on it and
+/// checks the key frames the virtual keyboard sends.
+fn relays(tag: &str, args: &[&str], keys: impl FnOnce(&Uinput), want: &[Frame]) -> Rig {
+    let name = format!("mechabounce-e2e-{}-{tag}", std::process::id());
     let src = fake_keyboard(&name);
     let src_sys = src.sysname().unwrap();
     let src_node = event_node(&src_sys).expect("no event node for the fake keyboard");
 
-    let _child = KillOnDrop(
+    let child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_mechabounce"))
             .args([
                 "--keyboard",
@@ -131,6 +154,7 @@ fn filters_chatter_and_relays_leds() {
                 "--verbosity",
                 "0",
             ])
+            .args(args)
             .spawn()
             .unwrap(),
     );
@@ -143,39 +167,80 @@ fn filters_chatter_and_relays_leds() {
             Instant::now() < deadline,
             "the binary never created its virtual keyboard"
         );
-        sleep(Duration::from_millis(10));
+        ms(10);
     };
-    sleep(Duration::from_millis(50));
+    ms(50);
     let sink = Evdev::open(Path::new(&sink_node)).unwrap();
     // The binary grabs right after creating the clone; give it a moment.
-    sleep(Duration::from_millis(250));
+    ms(250);
 
-    let ms = |n| sleep(Duration::from_millis(n));
-    src.write(&key(KEY_MACRO1, 1)).unwrap();
-    ms(2);
-    src.write(&key(KEY_MACRO1, 0)).unwrap();
-    ms(5);
-    src.write(&key(KEY_MACRO1, 1)).unwrap(); // chatter
-    ms(2);
-    src.write(&key(KEY_MACRO1, 0)).unwrap(); // its release
-    ms(60);
-    src.write(&key(KEY_MACRO1, 1)).unwrap();
-    ms(2);
-    src.write(&key(KEY_MACRO1, 0)).unwrap();
-    src.write(&key(KEY_MACRO2, 1)).unwrap(); // another key right away
-    src.write(&key(KEY_MACRO2, 0)).unwrap();
+    keys(&src);
+    assert_eq!(key_frames(&sink, want.len()), want);
+    Rig {
+        sink,
+        _child: child,
+        src,
+    }
+}
 
-    let frame = |code: u16, value| vec![(EV_MSC, MSC_SCAN, code as i32), (EV_KEY, code, value)];
-    assert_eq!(
-        key_frames(&sink, 6),
-        [
+#[test]
+#[ignore = "needs root and /dev/uinput; run with `just e2e`"]
+fn defer_release_keeps_a_key_held_through_a_bounce() {
+    relays(
+        "defer",
+        &[],
+        |src| {
+            src.write(&key(KEY_MACRO1, 1)).unwrap();
+            ms(2);
+            src.write(&key(KEY_MACRO1, 0)).unwrap(); // bounce up
+            ms(3);
+            src.write(&key(KEY_MACRO1, 1)).unwrap(); // bounce down
+            ms(80);
+            src.write(&key(KEY_MACRO1, 0)).unwrap();
+            // Its release goes out about threshold + 1 ms later.
+            ms(100);
+            src.write(&key(KEY_MACRO2, 1)).unwrap();
+            ms(2);
+            src.write(&key(KEY_MACRO2, 0)).unwrap();
+        },
+        &[
+            frame(KEY_MACRO1, 1),
+            deferred_up(KEY_MACRO1),
+            frame(KEY_MACRO2, 1),
+            deferred_up(KEY_MACRO2),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "needs root and /dev/uinput; run with `just e2e`"]
+fn drop_press_filters_chatter_and_relays_leds() {
+    let Rig { src, sink, _child } = relays(
+        "drop",
+        &["--no-defer-release"],
+        |src| {
+            src.write(&key(KEY_MACRO1, 1)).unwrap();
+            ms(2);
+            src.write(&key(KEY_MACRO1, 0)).unwrap();
+            ms(5);
+            src.write(&key(KEY_MACRO1, 1)).unwrap(); // chatter
+            ms(2);
+            src.write(&key(KEY_MACRO1, 0)).unwrap(); // its release
+            ms(60);
+            src.write(&key(KEY_MACRO1, 1)).unwrap();
+            ms(2);
+            src.write(&key(KEY_MACRO1, 0)).unwrap();
+            src.write(&key(KEY_MACRO2, 1)).unwrap(); // another key right away
+            src.write(&key(KEY_MACRO2, 0)).unwrap();
+        },
+        &[
             frame(KEY_MACRO1, 1),
             frame(KEY_MACRO1, 0),
             frame(KEY_MACRO1, 1),
             frame(KEY_MACRO1, 0),
             frame(KEY_MACRO2, 1),
             frame(KEY_MACRO2, 0),
-        ]
+        ],
     );
 
     // Caps Lock set on the virtual keyboard reaches the real one.

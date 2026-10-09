@@ -4,6 +4,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use mechabounce::debounce::Mode;
 use mechabounce::filter::Filter;
 use mechabounce::sys::{
     EV_CNT, EV_LED, EV_REP, EV_SND, Evdev, InputEvent, KeyBits, Uinput, monotonic_ns, ones,
@@ -15,9 +16,9 @@ const BY_ID: &str = "/dev/input/by-id";
 const USAGE: &str = "\
 Usage: mechabounce [OPTIONS]
 
-Filters keyboard chatter: drops a key press that follows the same key's
-release within the threshold, and re-emits everything else on a virtual
-copy of the keyboard.
+Filters keyboard chatter: holds each key release back for the threshold,
+so a bounce that presses the key again within it is swallowed, and
+re-emits everything else on a virtual copy of the keyboard.
 
 Options:
   -k, --keyboard DEV   Keyboard to filter: a name in /dev/input/by-id, an
@@ -25,6 +26,11 @@ Options:
                        [default: the only *-event-kbd in /dev/input/by-id]
   -t, --threshold MS   A press this soon after the key's release is
                        chatter [default: 30]
+  --defer-release      Hold each release back for the threshold; a press
+                       within it cancels both [default]
+  --no-defer-release   Forward releases at once and drop the press after
+                       a quick release instead (the original rule; a
+                       bounce while pressing can lose a held key)
   -v, --verbosity N    0 quiet, 1 log filtered events, 2 log every key
                        [default: 1]
   -l, --list           List the keyboards in /dev/input/by-id
@@ -35,6 +41,7 @@ Options:
 struct Args {
     keyboard: Option<String>,
     threshold_ms: u64,
+    mode: Mode,
     verbosity: u8,
     list: bool,
 }
@@ -84,14 +91,19 @@ fn run() -> Result<(), String> {
     if args.verbosity >= 1 {
         let name = src.name().map_err(ctx("read name"))?;
         eprintln!(
-            "filtering \"{}\" ({}) with a {} ms threshold",
+            "filtering \"{}\" ({}) with a {} ms threshold, {}",
             String::from_utf8_lossy(&name),
             path.display(),
-            args.threshold_ms
+            args.threshold_ms,
+            match args.mode {
+                Mode::DeferRelease => "deferring releases",
+                Mode::DropPress => "dropping quick presses",
+            }
         );
     }
     let mut filter = Filter::new(
         args.threshold_ms * 1_000_000,
+        args.mode,
         soft_repeat,
         t0,
         args.verbosity,
@@ -168,6 +180,11 @@ fn readable(fd: i32, timeout_ms: u64) -> io::Result<bool> {
     }
 }
 
+/// How long a deferred release waits past its deadline. It covers a press
+/// that is already timestamped but not yet readable, so a bounce right at the
+/// deadline can't slip through as a second keystroke.
+const FLUSH_MARGIN_NS: u64 = 1_000_000;
+
 /// Source events go through the filter to the virtual keyboard; LED and
 /// sound state set on the virtual keyboard goes back to the real one.
 fn relay(src: &Evdev, ui: &Uinput, filter: &mut Filter) -> io::Result<()> {
@@ -179,7 +196,8 @@ fn relay(src: &Evdev, ui: &Uinput, filter: &mut Filter) -> io::Result<()> {
         revents: 0,
     });
     loop {
-        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
+        let timeout = poll_timeout(filter.next_deadline());
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) } < 0 {
             let e = io::Error::last_os_error();
             if e.kind() == io::ErrorKind::Interrupted {
                 continue;
@@ -203,11 +221,6 @@ fn relay(src: &Evdev, ui: &Uinput, filter: &mut Filter) -> io::Result<()> {
                     filter.resync(&held, monotonic_ns());
                 }
             }
-            let ready = filter.ready();
-            if !ready.is_empty() {
-                ui.write(ready)?;
-                filter.consume();
-            }
         }
 
         if fds[1].revents != 0 {
@@ -224,13 +237,30 @@ fn relay(src: &Evdev, ui: &Uinput, filter: &mut Filter) -> io::Result<()> {
                 src.write(&buf[..=k])?;
             }
         }
+
+        filter.flush_due(monotonic_ns().saturating_sub(FLUSH_MARGIN_NS));
+        let ready = filter.ready();
+        if !ready.is_empty() {
+            ui.write(ready)?;
+            filter.consume();
+        }
     }
+}
+
+/// Milliseconds until a deferred release due at `deadline` should go out,
+/// rounded up, or -1 to wait for events alone.
+fn poll_timeout(deadline: Option<u64>) -> i32 {
+    deadline.map_or(-1, |d| {
+        let wait = (d + FLUSH_MARGIN_NS).saturating_sub(monotonic_ns());
+        wait.div_ceil(1_000_000).min(i32::MAX as u64) as i32
+    })
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
     let mut args = Args {
         keyboard: None,
         threshold_ms: 30,
+        mode: Mode::DeferRelease,
         verbosity: 1,
         list: false,
     };
@@ -261,6 +291,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                     _ => return Err(format!("{flag} takes 0, 1 or 2")),
                 };
             }
+            "--defer-release" => args.mode = Mode::DeferRelease,
+            "--no-defer-release" => args.mode = Mode::DropPress,
             "-l" | "--list" => args.list = true,
             "-h" | "--help" => {
                 print!("{USAGE}");

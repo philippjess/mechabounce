@@ -17,7 +17,7 @@ e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     bin=$(cargo test --test it --no-run --message-format=json | jq -r 'select(.profile.test == true and .target.name == "it") | .executable')
-    sudo "$bin" --ignored --exact e2e::filters_chatter_and_relays_leds
+    sudo "$bin" --ignored e2e::
 
 # Install the binary, the systemd template and the udev rule (asks for sudo)
 install: build

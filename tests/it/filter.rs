@@ -1,3 +1,4 @@
+use mechabounce::debounce::Mode;
 use mechabounce::filter::Filter;
 use mechabounce::sys::{
     EV_KEY, EV_LED, EV_MSC, EV_REL, EV_SND, EV_SYN, InputEvent, KeyBits, LED_CAPSL, MSC_SCAN,
@@ -10,7 +11,7 @@ const A: u16 = 30;
 const B: u16 = 48;
 
 fn filter() -> Filter {
-    Filter::new(30 * MS, true, 0, 0)
+    Filter::new(30 * MS, Mode::DropPress, true, 0, 0)
 }
 
 fn key(t: u64, code: u16, value: i32) -> [InputEvent; 3] {
@@ -77,7 +78,7 @@ fn source_repeats_are_dropped_when_the_kernel_repeats_for_us() {
 
 #[test]
 fn source_repeats_pass_without_soft_repeat() {
-    let mut f = Filter::new(30 * MS, false, 0, 0);
+    let mut f = Filter::new(30 * MS, Mode::DropPress, false, 0, 0);
     let repeat = [ev(600, EV_KEY, A, 2), ev(600, EV_SYN, SYN_REPORT, 0)];
     assert_eq!(feed(&mut f, &repeat), []);
     feed(&mut f, &key(700, A, 1));
@@ -114,7 +115,13 @@ fn other_events_pass() {
 
 #[test]
 fn events_from_before_the_grab_are_ignored() {
-    let mut f = Filter::new(30 * MS, true, ev(100, 0, 0, 0).time_ns(), 0);
+    let mut f = Filter::new(
+        30 * MS,
+        Mode::DropPress,
+        true,
+        ev(100, 0, 0, 0).time_ns(),
+        0,
+    );
     assert_eq!(feed(&mut f, &key(99, A, 1)), []);
     assert_eq!(feed(&mut f, &key(100, B, 1)), key(100, B, 1));
 }
@@ -155,4 +162,77 @@ fn syn_dropped_discards_until_the_next_report_then_releases_stale_keys() {
     // A's synthetic release counts for debouncing.
     assert_eq!(feed(&mut f, &key(20, A, 1)), []);
     assert_eq!(feed(&mut f, &key(40, B, 0)), key(40, B, 0));
+}
+
+fn defer() -> Filter {
+    Filter::new(30 * MS, Mode::DeferRelease, true, 0, 0)
+}
+
+fn up(code: u16) -> [InputEvent; 2] {
+    [InputEvent::new(EV_KEY, code, 0), InputEvent::syn_report()]
+}
+
+#[test]
+fn a_bounce_while_pressing_keeps_the_key_held() {
+    let mut f = defer();
+    assert_eq!(feed(&mut f, &key(0, A, 1)), key(0, A, 1));
+    assert_eq!(feed(&mut f, &key(3, A, 0)), []);
+    assert_eq!(feed(&mut f, &key(6, A, 1)), []);
+    assert_eq!(feed(&mut f, &key(100, A, 0)), []);
+    f.flush_due(ev(130, 0, 0, 0).time_ns());
+    assert_eq!(f.ready(), []);
+    f.flush_due(ev(131, 0, 0, 0).time_ns());
+    assert_eq!(f.ready(), up(A));
+}
+
+#[test]
+fn due_releases_go_ahead_of_the_open_frame() {
+    let mut f = defer();
+    feed(&mut f, &key(0, A, 1));
+    assert_eq!(feed(&mut f, &key(10, A, 0)), []);
+    let [scan, press, syn] = key(20, B, 1);
+    assert_eq!(feed(&mut f, &[scan, press]), []);
+    f.flush_due(ev(41, 0, 0, 0).time_ns());
+    assert_eq!(f.ready(), up(A));
+    assert!(!f.push(syn));
+    let [a_up, a_syn] = up(A);
+    assert_eq!(f.ready(), [a_up, a_syn, scan, press, syn]);
+    f.consume();
+    assert_eq!(f.next_deadline(), None);
+}
+
+#[test]
+fn push_flushes_releases_due_by_the_event_time() {
+    let mut f = defer();
+    feed(&mut f, &key(0, A, 1));
+    assert_eq!(feed(&mut f, &key(10, A, 0)), []);
+    assert_eq!(f.next_deadline(), Some(ev(40, 0, 0, 0).time_ns()));
+    assert_eq!(feed(&mut f, &key(40, B, 1)), key(40, B, 1));
+    let mut want = up(A).to_vec();
+    want.extend(key(41, A, 1));
+    assert_eq!(feed(&mut f, &key(41, A, 1)), want);
+}
+
+#[test]
+fn resync_drops_pending_releases() {
+    let mut f = defer();
+    feed(&mut f, &key(0, A, 1));
+    feed(&mut f, &key(0, B, 1));
+    assert_eq!(feed(&mut f, &key(5, A, 0)), []);
+    assert_eq!(feed(&mut f, &key(5, B, 0)), []);
+    assert!(!f.push(ev(6, EV_SYN, SYN_DROPPED, 0)));
+    assert!(f.push(ev(6, EV_SYN, SYN_REPORT, 0)));
+
+    // The device says B is down again and A is up.
+    let mut held: KeyBits = Default::default();
+    held[B as usize / 64] |= 1 << (B % 64);
+    f.resync(&held, ev(7, 0, 0, 0).time_ns());
+    assert_eq!(f.ready(), up(A));
+    f.consume();
+    assert_eq!(f.next_deadline(), None);
+
+    // A went up for good, so its next press passes at once.
+    assert_eq!(feed(&mut f, &key(8, A, 1)), key(8, A, 1));
+    assert_eq!(feed(&mut f, &key(40, B, 0)), []);
+    assert_eq!(f.next_deadline(), Some(ev(70, 0, 0, 0).time_ns()));
 }
