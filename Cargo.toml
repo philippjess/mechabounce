@@ -1,0 +1,15 @@
+[package]
+name = "mechabounce"
+version = "0.1.0"
+edition = "2024"
+description = "Keyboard chatter filter for Linux: evdev in, debounced uinput out"
+repository = "https://github.com/philippjess/mechabounce"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

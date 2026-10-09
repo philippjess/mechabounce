@@ -1,0 +1,6 @@
+# Filter every keyboard interface of the keyboards matched here. Get the
+# ID_SERIAL of yours with:
+#   udevadm info -q property /dev/input/by-id/<name>-event-kbd | grep ID_SERIAL=
+# Add one line per keyboard. The virtual keyboards mechabounce creates have
+# no ID_SERIAL, so they never match.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", ENV{ID_SERIAL}=="Glorious_GMMK_Pro", TAG+="systemd", ENV{SYSTEMD_WANTS}+="mechabounce@%k.service"

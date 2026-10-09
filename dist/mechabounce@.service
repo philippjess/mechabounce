@@ -1,0 +1,45 @@
+# One instance per keyboard interface, named after its event node:
+# mechabounce@event4.service filters /dev/input/event4. 70-mechabounce.rules
+# starts it when the keyboard appears; BindsTo stops it when it goes.
+[Unit]
+Description=Keyboard chatter filter for /dev/input/%I
+BindsTo=dev-input-%i.device
+After=dev-input-%i.device
+
+[Service]
+Environment=MECHABOUNCE_ARGS=
+EnvironmentFile=-/etc/mechabounce.conf
+ExecStart=/usr/local/bin/mechabounce --keyboard /dev/input/%I $MECHABOUNCE_ARGS
+Restart=on-failure
+RestartSec=1
+
+# Root for the two root-owned device nodes, but without any capability and
+# with nothing else to touch. An unprivileged user would need /dev/uinput
+# opened up to a group, which lets that group inject keystrokes.
+DevicePolicy=closed
+DeviceAllow=char-input rw
+DeviceAllow=/dev/uinput rw
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=none
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+PrivateTmp=yes
