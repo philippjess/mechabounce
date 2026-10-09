@@ -59,7 +59,7 @@ keyboard is plugged in, and systemd stops it on unplug. The service runs as
 root for its two device nodes, but with no capabilities, a read-only system,
 and no network.
 Set the threshold and other options in `/etc/mechabounce.conf`, and follow the
-log with `journalctl -u 'mechabounce@*' -f`.
+log with `journalctl -t mechabounce -f`.
 
 ## Options
 
