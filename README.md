@@ -63,3 +63,7 @@ log with `journalctl -u 'mechabounce@*' -f`.
 just check   # fmt, clippy, unit tests
 just e2e     # through the real kernel: fake uinput keyboard -> mechabounce -> virtual keyboard (sudo)
 ```
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE).

@@ -3,6 +3,7 @@ name = "mechabounce"
 version = "0.1.0"
 edition = "2024"
 description = "Keyboard chatter filter for Linux: evdev in, debounced uinput out"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/philippjess/mechabounce"
 
 [dependencies]
